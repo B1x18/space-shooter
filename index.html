@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<!--
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+software, either in source code form or as a compiled binary, for any purpose,
+commercial or non-commercial, and by any means.
+
+In jurisdictions that recognize copyright laws, the author or authors of this
+software dedicate any and all copyright interest in the software to the public
+domain. We make this dedication for the benefit of the public at large and to
+the detriment of our heirs and successors. We intend this dedication to be an
+overt act of relinquishment in perpetuity of all present and future rights to
+this software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, see <https://unlicense.org>.
+-->
+<html>
+<head>
+    <title>Space Shooter</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.87.0/phaser.min.js"></script>
+    <style>
+        body { margin: 0; display: flex; justify-content: center; align-items: center; background: #000; height: 100vh; }
+        #mobile-warning {
+            display: none;
+            position: fixed;
+            flex-direction: column;
+            height: 100%;
+            align-items: center;
+            justify-content: center;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: #000;
+            color: #fff;
+            padding: 20px;
+            text-align: center;
+            font-family: Arial, sans-serif;
+            z-index: 1000;
+        }
+        #ammo-warning {
+            position: absolute;
+            color: #ff0000;
+            font-family: Arial, sans-serif;
+            font-size: 24px;
+            top: 60px;
+            right: 20px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+<div id="mobile-warning">
+    <h1>Desktop Required</h1>
+    <p>This game requires a keyboard and larger screen.</p>
+</div>
+<div id="ammo-warning">Out of Ammo!</div>
+<script>
+
+// Mobile detection
+function isMobileDevice() {
+    return (typeof window.orientation !== "undefined") || (navigator.userAgent.indexOf('IEMobile') !== -1);
+}
+
+if (isMobileDevice() || window.innerWidth < 768) {
+    document.getElementById('mobile-warning').style.display = 'flex';
+}
+
+const config = {
+    type: Phaser.AUTO,
+    scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: window.innerWidth,
+        height: window.innerHeight,
+    },
+    physics: {
+        default: 'arcade',
+        arcade: {
+            gravity: { y: 0 },
+            debug: false
+        }
+    },
+    scene: {
+        preload: preload,
+        create: create,
+        update: update
+    }
+};
+
+let game = new Phaser.Game(config);
+
+let player;
+let cursors;
+let wasdKeys;
+let bullets;
+let enemies;
+let asteroids;
+let stars;
+let thrusterEmitter;
+let score = 0;
+let lives = 3;
+let ammo = 30;
+let maxAmmo = 30;
+let scoreText;
+let livesText;
+let ammoText;
+let gameOver = false;
+let lastFired = 0;
+let fireRate = 200;
+let highScore = parseInt(localStorage.getItem('highScore')) || 0;
+let highScoreText;
+let isPaused = false;
+const DRAG = 0.99;
+const ROTATION_SPEED = 3;
+const ACCELERATION = 5;
+const MAX_SPEED = 400;
+const BULLET_LIFESPAN = 5000;
+
+function createShipGraphics(scene) {
+    const graphics = scene.add.graphics();
+    const texture = graphics.generateTexture('ship', 16, 35);
+    graphics.destroy();
+    return texture;
+}
+
+function createExplosion(scene, x, y) {
+    const particles = scene.add.particles(x, y, 'particle', {
+        speed: { min: 50, max: 200 },
+        angle: { min: 0, max: 360 },
+        scale: { start: 0.5, end: 0 },
+        lifespan: 800,
+        gravityY: 0,
+        quantity: 20,
+        tint: [0xff9999, 0xff0000, 0xffff00],
+        emitting: false
+    });
+    
+    particles.explode(20);
+    scene.time.delayedCall(800, () => particles.destroy());
+}
+
+function wrapObject(obj) {
+    if (obj.x < 0) obj.x = game.config.width;
+    if (obj.x > game.config.width) obj.x = 0;
+    if (obj.y < 0) obj.y = game.config.height;
+    if (obj.y > game.config.height) obj.y = 0;
+}
+
+function preload() {
+    // Create particle for explosions
+    const particleGraphics = this.add.graphics();
+    particleGraphics.fillStyle(0xffffff);
+    particleGraphics.fillCircle(4, 4, 4);
+    particleGraphics.generateTexture('particle', 8, 8);
+    particleGraphics.destroy();
+
+    // Create laser bullet
+    const bulletGraphics = this.add.graphics();
+    bulletGraphics.lineStyle(2, 0xff00ff);  // Bullet color
+    bulletGraphics.strokeRect(-2, -6, 4, 12);
+    bulletGraphics.generateTexture('bullet', 4, 12);
+    bulletGraphics.destroy();
+
+    // Images
+    this.load.image('enemy', 'assets/enemy.png');
+    this.load.image('asteroid', 'assets/asteroid.png');
+    this.load.image('ship', 'assets/rocket.png');
+
+    // Audio
+    this.load.audio('gameoverSound', ['assets/sound/gameover.mp3']);
+    this.load.audio('shoot', ['assets/sound/shoot.mp3']);
+    this.load.audio('hurt', ['assets/sound/hurt.mp3']);
+    this.load.audio('theme', ['assets/sound/theme.mp3']);
+}
+
+function create() {
+    createShipGraphics(this);
+    
+    // Starfield
+    stars = [];
+    for (let layer = 0; layer < 3; layer++) {
+        stars[layer] = this.add.group();
+        const starCount = 50 - layer * 15; // Fewer stars in faster layers
+        for (let i = 0; i < starCount; i++) {
+            const x = Phaser.Math.Between(0, game.config.width);
+            const y = Phaser.Math.Between(0, game.config.height);
+            const size = Phaser.Math.FloatBetween(0.5, 4 - layer * 0.5);
+            const brightness = Phaser.Math.FloatBetween(0.2, 0.8);
+            const star = this.add.rectangle(x, y, size, size, 0xffffff)
+                .setAlpha(brightness);
+            stars[layer].add(star);
+        }
+    }
+
+    // Create player
+    player = this.physics.add.sprite(game.config.width / 2, game.config.height/1.8, 'ship');
+    player.setDrag(DRAG);
+    player.setAngularDrag(DRAG);
+    player.setMaxVelocity(MAX_SPEED);
+    player.setSize(16, 30);
+
+    // Controls setup
+    cursors = this.input.keyboard.createCursorKeys();
+    wasdKeys = this.input.keyboard.addKeys({
+        up: Phaser.Input.Keyboard.KeyCodes.W,
+        down: Phaser.Input.Keyboard.KeyCodes.S,
+        left: Phaser.Input.Keyboard.KeyCodes.A,
+        right: Phaser.Input.Keyboard.KeyCodes.D,
+        space: Phaser.Input.Keyboard.KeyCodes.SPACE
+    });
+
+    // Thruster effect
+    thrusterEmitter = this.add.particles(0, 0, 'particle', {
+        speed: { min: 100, max: 200 },
+        scale: { start: 0.4, end: 0 },
+        lifespan: 300,
+        quantity: 2,
+        tint: [0xff9900, 0xff6600],
+        emitting: false
+    });
+
+    bullets = this.physics.add.group();
+    enemies = this.physics.add.group();
+    asteroids = this.physics.add.group();
+    
+    // UI elements
+    scoreText = this.add.text(16, 16, 'Score: 0', { fontSize: '32px', fill: '#fff' });
+    livesText = this.add.text(game.config.width - 180, 25, 'Lives: 3', { fontSize: '32px', fill: '#fff' });
+    ammoText = this.add.text(16, 56, 'Ammo: ' + ammo, { fontSize: '32px', fill: '#fff' });
+    highScoreText = this.add.text(16, 96, 'High Score: ' + highScore, { fontSize: '32px', fill: '#fff' });
+
+    this.input.keyboard.on('keydown-ESC', () => {
+        if (gameOver) return;
+        
+        isPaused = !isPaused;
+        if (isPaused) {
+            // Pause game
+            this.physics.pause();
+            theme.pause();
+
+            // Pause screen
+            this.pauseText = this.add.text(game.config.width/2, game.config.height/2, 
+                'PAUSED\nPress ESC to Resume', {
+                fontSize: '48px',
+                fill: '#fff',
+                align: 'center'
+            }).setOrigin(0.5);
+
+            // Dim the screen
+            this.pauseOverlay = this.add.rectangle(0, 0, 
+                game.config.width, game.config.height,
+                0x000000, 0.5)
+                .setOrigin(0)
+                .setDepth(1);
+            this.pauseText.setDepth(2);
+
+            if (thrusterEmitter) {
+                thrusterEmitter.pause();
+            }
+        } else {
+            // Resume game
+            this.physics.resume();
+            theme.resume();
+            this.pauseText.destroy();
+            this.pauseOverlay.destroy();
+
+            if (thrusterEmitter) {
+                thrusterEmitter.resume();
+            }
+        }
+    });
+
+    // Add colliders
+    this.physics.add.collider(bullets, enemies, bulletHitEnemy, null, this);
+    this.physics.add.collider(bullets, asteroids, bulletHitAsteroid, null, this);
+    this.physics.add.collider(player, enemies, playerHitEnemy, null, this);
+    this.physics.add.collider(player, asteroids, playerHitAsteroid, null, this);
+    this.physics.add.collider(player, bullets, playerHitBullet, null, this);
+
+    // Spawn enemies and asteroids
+    this.time.addEvent({
+        delay: 2000,
+        callback: spawnEnemy,
+        callbackScope: this,
+        loop: true
+    });
+
+    this.time.addEvent({
+        delay: 3000,
+        callback: spawnAsteroid,
+        callbackScope: this,
+        loop: true
+    });
+
+    // Ammo regeneration
+    this.time.addEvent({
+        delay: 1500,
+        callback: regenerateAmmo,
+        callbackScope: this,
+        loop: true
+    });
+
+    // Fullscreen toggle
+    this.input.keyboard.on('keydown-F', () => {
+        if (this.scale.isFullscreen) {
+            this.scale.stopFullscreen();
+        } else {
+            this.scale.startFullscreen();
+        }
+    });
+
+    // Sound 
+    gameoverSound = this.sound.add("gameoverSound", { loop: false });
+    shoot = this.sound.add("shoot", { loop: false });
+    hurt = this.sound.add("hurt", { loop: false });
+    theme = this.sound.add("theme", { loop: true, volume: 0.4 });
+    theme.play();
+
+    // Regenerate on restart
+    ammo = 30;
+}
+
+function regenerateAmmo() {
+    if (isPaused) return;
+    if (gameOver) {
+        ammo = 30;
+        return; 
+    }
+    if (ammo < maxAmmo) {
+        ammo++;
+        ammoText.setText('Ammo: ' + ammo);
+    }
+}
+
+function update(time) {
+    if (gameOver || isPaused) return;
+    // Rotation (WASD or Arrow keys)
+    if (cursors.left.isDown || wasdKeys.left.isDown) {
+        player.setAngularVelocity(-ROTATION_SPEED * 100);
+    } else if (cursors.right.isDown || wasdKeys.right.isDown) {
+        player.setAngularVelocity(ROTATION_SPEED * 100);
+    } else {
+        player.setAngularVelocity(0);
+    }
+
+    // Thrust
+    if (cursors.up.isDown || wasdKeys.up.isDown) {
+        const angleRad = Phaser.Math.DegToRad(player.angle - 90);
+        player.setAcceleration(
+            Math.cos(angleRad) * ACCELERATION * 100,
+            Math.sin(angleRad) * ACCELERATION * 100
+        );
+
+        // Update thruster effect
+        const thrusterX = player.x - Math.cos(angleRad) * 20;
+        const thrusterY = player.y - Math.sin(angleRad) * 20;
+        thrusterEmitter.setPosition(thrusterX, thrusterY);
+        thrusterEmitter.setAngle({
+            min: player.angle + 70,
+            max: player.angle + 110
+        });
+        thrusterEmitter.emitting = true;
+
+        // Update background
+        updateParallaxBackground();
+    } else {
+        player.setAcceleration(0, 0);
+        thrusterEmitter.emitting = false;
+        updateParallaxBackground();
+    }
+
+    // Screen wrapping
+    wrapObject(player);
+    bullets.getChildren().forEach(bullet => {
+        if (time > bullet.creationTime + BULLET_LIFESPAN) {
+            bullet.destroy();
+        } else {
+            wrapObject(bullet);
+        }
+    });
+    enemies.getChildren().forEach(wrapObject);
+    asteroids.getChildren().forEach(wrapObject);
+
+    // Shooting with ammo limit
+    if ((cursors.space.isDown || wasdKeys.space.isDown) && time > lastFired && ammo > 0) {
+        const angleRad = Phaser.Math.DegToRad(player.angle - 90);
+        const bullet = bullets.create(
+            player.x + Math.cos(angleRad) * 20,
+            player.y + Math.sin(angleRad) * 20,
+            'bullet'
+        );
+        bullet.creationTime = time;
+        bullet.setRotation(player.rotation);
+        bullet.setVelocity(
+            Math.cos(angleRad) * 500 + player.body.velocity.x,
+            Math.sin(angleRad) * 500 + player.body.velocity.y
+        );
+        lastFired = time + fireRate;
+        ammo--;
+        ammoText.setText('Ammo: ' + ammo);
+        shoot.play();
+        
+        // Show warning when out of ammo
+        if (ammo === 0) {
+            document.getElementById('ammo-warning').style.display = 'block';
+            this.time.delayedCall(1000, () => {
+                document.getElementById('ammo-warning').style.display = 'none';
+            });
+        }
+    }
+}
+
+function updateParallaxBackground() {
+    const velocityX = player.body.velocity.x;
+    const velocityY = player.body.velocity.y;
+    
+    stars.forEach((layer, index) => {
+        const parallaxFactor = (index + 1) * 0.05;
+        layer.getChildren().forEach(star => {
+            star.x -= (velocityX * 0.02) * parallaxFactor;
+            star.y -= (velocityY * 0.02) * parallaxFactor;
+            
+            // Wrap stars
+            if (star.x < 0) star.x = game.config.width;
+            if (star.x > game.config.width) star.x = 0;
+            if (star.y < 0) star.y = game.config.height;
+            if (star.y > game.config.height) star.y = 0;
+        });
+    });
+}
+
+function playerHitBullet(player, bullet) {
+    // Only collide with bullets that have existed for a while
+    if (bullet.creationTime + 200 < game.loop.time) {
+        createExplosion(this, player.x, player.y);
+        bullet.destroy();
+        hurt.play();
+        lives--;
+        livesText.setText('Lives: ' + lives);
+        
+        if (lives <= 0) {
+            gameOver = true;
+            player.destroy();
+            theme.stop();
+            gameoverSound.play();
+            thrusterEmitter.destroy();
+
+            if (score > highScore) {
+                highScore = score;
+                localStorage.setItem('highScore', highScore);
+                highScoreText.setText('High Score: ' + highScore);
+            }
+            
+            this.add.text(game.config.width/2, game.config.height/2, 'GAME OVER\nScore: ' + score + '\nHigh Score: ' + highScore + '\nClick to restart', {
+                fontSize: '48px',
+                fill: '#fff',
+                align: 'center'
+            }).setOrigin(0.5);
+            
+            this.input.on('pointerdown', () => {
+                score = 0;
+                ammo = 30;
+                lives = 3;
+                ammo = maxAmmo;
+                gameOver = false;
+                this.scene.restart();
+            });
+        }
+    }
+}
+
+function spawnEnemy() {
+    if (gameOver || isPaused) return;
+    
+    const x = Phaser.Math.Between(0, game.config.width);
+    const enemy = enemies.create(x, 0, 'enemy');
+    enemy.setVelocity(Phaser.Math.Between(-100, 100), 100);
+}
+
+function spawnAsteroid() {
+    if (gameOver || isPaused) return;
+    
+    const x = Phaser.Math.Between(0, game.config.width);
+    const asteroid = asteroids.create(x, 0, 'asteroid');
+    asteroid.setVelocity(Phaser.Math.Between(-50, 50), 75);
+    asteroid.setAngularVelocity(50);
+}
+
+function bulletHitEnemy(bullet, enemy) {
+    createExplosion(this, enemy.x, enemy.y);
+    bullet.destroy();
+    enemy.destroy();
+    hurt.play();
+    score += 10;
+    scoreText.setText('Score: ' + score);
+}
+
+function bulletHitAsteroid(bullet, asteroid) {
+    createExplosion(this, asteroid.x, asteroid.y);
+    bullet.destroy();
+    asteroid.destroy();
+    hurt.play();
+    score += 20;
+    scoreText.setText('Score: ' + score);
+}
+
+function playerHitEnemy(player, enemy) {
+    createExplosion(this, enemy.x, enemy.y);
+    enemy.destroy();
+    hurt.play();
+    lives--;
+    livesText.setText('Lives: ' + lives);
+    
+    if (lives <= 0) {
+        gameOver = true;
+        createExplosion(this, player.x, player.y);
+        player.destroy();
+        theme.stop();
+        gameoverSound.play();
+        thrusterEmitter.destroy();
+
+        if (score > highScore) {
+            highScore = score;
+            localStorage.setItem('highScore', highScore);
+            highScoreText.setText('High Score: ' + highScore);
+        }
+        
+        this.add.text(game.config.width/2, game.config.height/2, 'GAME OVER\nScore: ' + score + '\nHigh Score: ' + highScore + '\nClick to restart', {
+            fontSize: '48px',
+            fill: '#fff',
+            align: 'center'
+        }).setOrigin(0.5);
+        
+        this.input.on('pointerdown', () => {
+            score = 0;
+            lives = 3;
+            gameOver = false;
+            this.scene.restart();
+        });
+    }
+}
+
+function playerHitAsteroid(player, asteroid) {
+    createExplosion(this, asteroid.x, asteroid.y);
+    asteroid.destroy();
+    hurt.play();
+    lives--;
+    livesText.setText('Lives: ' + lives);
+    
+    if (lives <= 0) {
+        gameOver = true;
+        createExplosion(this, player.x, player.y);
+        player.destroy();
+        theme.stop();
+        gameoverSound.play();
+        thrusterEmitter.destroy();
+
+        if (score > highScore) {
+            highScore = score;
+            localStorage.setItem('highScore', highScore);
+            highScoreText.setText('High Score: ' + highScore);
+        }
+        
+        this.add.text(game.config.width/2, game.config.height/2, 'GAME OVER\nScore: ' + score + '\nHigh Score: ' + highScore + '\nClick to restart', {
+            fontSize: '48px',
+            fill: '#fff',
+            align: 'center'
+        }).setOrigin(0.5);
+        
+        this.input.on('pointerdown', () => {
+            score = 0;
+            lives = 3;
+            gameOver = false;
+            this.scene.restart();
+        });
+    }
+}
+</script>
+</body>
+</html>
